@@ -617,13 +617,117 @@ const UploadMediaSchema = z.object({
     }
 );
 
+// Schema for strapi_content_types_get_all tool
+const ContentTypesGetAllSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty")
+}).strict();
+
+// Schema for strapi_content_types_get_one tool
+const ContentTypesGetOneSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty"),
+    uid: z.string().min(1, "UID is required (e.g., api::cat.cat)")
+}).strict();
+
+// Schema for strapi_content_types_create tool
+const ContentTypesCreateSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty"),
+    contentType: z.record(z.any()),
+    userAuthorized: z.union([
+        z.boolean(),
+        z.string().transform((str, ctx) => {
+            if (str === "true") return true;
+            if (str === "false") return false;
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "userAuthorized must be boolean true/false or string 'true'/'false'"
+            });
+            return z.NEVER;
+        })
+    ]).optional().default(false)
+}).strict().refine(
+    (data) => {
+        if (!data.userAuthorized) {
+            return false;
+        }
+        return true;
+    },
+    {
+        message: "Content type creation requires explicit user authorization (userAuthorized: true)",
+        path: ["userAuthorized"]
+    }
+);
+
+// Schema for strapi_content_types_update tool
+const ContentTypesUpdateSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty"),
+    uid: z.string().min(1, "UID is required (e.g., api::cat.cat)"),
+    contentType: z.record(z.any()),
+    userAuthorized: z.union([
+        z.boolean(),
+        z.string().transform((str, ctx) => {
+            if (str === "true") return true;
+            if (str === "false") return false;
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "userAuthorized must be boolean true/false or string 'true'/'false'"
+            });
+            return z.NEVER;
+        })
+    ]).optional().default(false)
+}).strict().refine(
+    (data) => {
+        if (!data.userAuthorized) {
+            return false;
+        }
+        return true;
+    },
+    {
+        message: "Content type update requires explicit user authorization (userAuthorized: true)",
+        path: ["userAuthorized"]
+    }
+);
+
+// Schema for strapi_content_types_delete tool
+const ContentTypesDeleteSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty"),
+    uid: z.string().min(1, "UID is required (e.g., api::cat.cat)"),
+    userAuthorized: z.union([
+        z.boolean(),
+        z.string().transform((str, ctx) => {
+            if (str === "true") return true;
+            if (str === "false") return false;
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "userAuthorized must be boolean true/false or string 'true'/'false'"
+            });
+            return z.NEVER;
+        })
+    ]).optional().default(false)
+}).strict().refine(
+    (data) => {
+        if (!data.userAuthorized) {
+            return false;
+        }
+        return true;
+    },
+    {
+        message: "Content type deletion requires explicit user authorization (userAuthorized: true)",
+        path: ["userAuthorized"]
+    }
+);
+
 // Collection of all schemas for easy access
 const ToolSchemas = {
     strapi_list_servers: ListServersSchema,
     strapi_get_content_types: GetContentTypesSchema,
     strapi_get_components: GetComponentsSchema,
     strapi_rest: RestSchema,
-    strapi_upload_media: UploadMediaSchema
+    strapi_upload_media: UploadMediaSchema,
+    strapi_content_types_get_all: ContentTypesGetAllSchema,
+    strapi_content_types_get_one: ContentTypesGetOneSchema,
+    strapi_content_types_create: ContentTypesCreateSchema,
+    strapi_content_types_update: ContentTypesUpdateSchema,
+    strapi_content_types_delete: ContentTypesDeleteSchema
 } as const;
 
 // TypeScript types derived from Zod schemas
@@ -1397,6 +1501,113 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         }
                     }
                 }
+            },
+            {
+                name: "strapi_content_types_get_all",
+                description: "Get all content types (tables) from Strapi Content-Type Builder. Returns all table structures including system tables.",
+                inputSchema: {
+                    ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_all),
+                    properties: {
+                        ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_all).properties,
+                        server: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_all).properties.server,
+                            description: "The name of the server to connect to"
+                        }
+                    }
+                },
+            },
+            {
+                name: "strapi_content_types_get_one",
+                description: "Get detailed structure of a specific content type (table) by UID. Example UID: api::cat.cat",
+                inputSchema: {
+                    ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_one),
+                    properties: {
+                        ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_one).properties,
+                        server: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_one).properties.server,
+                            description: "The name of the server to connect to"
+                        },
+                        uid: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_get_one).properties.uid,
+                            description: "The UID of the content type (e.g., api::cat.cat)"
+                        }
+                    }
+                },
+            },
+            {
+                name: "strapi_content_types_create",
+                description: "Create a new content type (table) in Strapi. IMPORTANT: This is a write operation that REQUIRES explicit user authorization via the userAuthorized parameter.",
+                inputSchema: {
+                    ...zodToJsonSchema(ToolSchemas.strapi_content_types_create),
+                    properties: {
+                        ...zodToJsonSchema(ToolSchemas.strapi_content_types_create).properties,
+                        server: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_create).properties.server,
+                            description: "The name of the server to connect to"
+                        },
+                        contentType: {
+                            type: "object",
+                            description: "The content type schema definition",
+                            additionalProperties: true
+                        },
+                        userAuthorized: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_create).properties.userAuthorized,
+                            description: "REQUIRED for creating content types. Client MUST obtain explicit user authorization before setting this to true.",
+                            default: false
+                        }
+                    }
+                },
+            },
+            {
+                name: "strapi_content_types_update",
+                description: "Update an existing content type (table) structure. Completely replaces the old structure. IMPORTANT: This is a write operation that REQUIRES explicit user authorization via the userAuthorized parameter.",
+                inputSchema: {
+                    ...zodToJsonSchema(ToolSchemas.strapi_content_types_update),
+                    properties: {
+                        ...zodToJsonSchema(ToolSchemas.strapi_content_types_update).properties,
+                        server: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_update).properties.server,
+                            description: "The name of the server to connect to"
+                        },
+                        uid: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_update).properties.uid,
+                            description: "The UID of the content type to update (e.g., api::cat.cat)"
+                        },
+                        contentType: {
+                            type: "object",
+                            description: "The new content type schema definition (complete replacement)",
+                            additionalProperties: true
+                        },
+                        userAuthorized: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_update).properties.userAuthorized,
+                            description: "REQUIRED for updating content types. Client MUST obtain explicit user authorization before setting this to true.",
+                            default: false
+                        }
+                    }
+                },
+            },
+            {
+                name: "strapi_content_types_delete",
+                description: "Delete a content type (table) and ALL its data. IMPORTANT: This is a destructive write operation that REQUIRES explicit user authorization via the userAuthorized parameter.",
+                inputSchema: {
+                    ...zodToJsonSchema(ToolSchemas.strapi_content_types_delete),
+                    properties: {
+                        ...zodToJsonSchema(ToolSchemas.strapi_content_types_delete).properties,
+                        server: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_delete).properties.server,
+                            description: "The name of the server to connect to"
+                        },
+                        uid: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_delete).properties.uid,
+                            description: "The UID of the content type to delete (e.g., api::cat.cat)"
+                        },
+                        userAuthorized: {
+                            ...zodToJsonSchema(ToolSchemas.strapi_content_types_delete).properties.userAuthorized,
+                            description: "REQUIRED for deleting content types. Client MUST obtain explicit user authorization before setting this to true. WARNING: This will delete all data.",
+                            default: false
+                        }
+                    }
+                },
             }
         ],
     };
@@ -1644,6 +1855,128 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         text: JSON.stringify(response, null, 2)
                     }
                 ]
+            };
+        } else if (name === "strapi_content_types_get_all") {
+            // Validate input using Zod
+            const validatedArgs = validateToolInput("strapi_content_types_get_all", args, requestId);
+            const { server } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+            const data = await makeStrapiRequest(server, "/api/content-type-builder/content-types", undefined, requestId);
+
+            result = {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            data: data,
+                            note: "返回所有表结构，包括系统表"
+                        }, null, 2),
+                    },
+                ],
+            };
+        } else if (name === "strapi_content_types_get_one") {
+            // Validate input using Zod
+            const validatedArgs = validateToolInput("strapi_content_types_get_one", args, requestId);
+            const { server, uid } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+            const data = await makeStrapiRequest(server, `/api/content-type-builder/content-types/${uid}`, undefined, requestId);
+
+            result = {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            data: data,
+                            note: `获取到表 ${uid} 的详细结构`
+                        }, null, 2),
+                    },
+                ],
+            };
+        } else if (name === "strapi_content_types_create") {
+            // Validate input using Zod (includes authorization check)
+            const validatedArgs = validateToolInput("strapi_content_types_create", args, requestId);
+            const { server, contentType, userAuthorized } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+
+            const data = await makeRestRequest(
+                server, 
+                "api/content-type-builder/content-types", 
+                "POST", 
+                undefined, 
+                contentType, 
+                userAuthorized, 
+                requestId
+            );
+
+            result = {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            data: data,
+                            note: "新表创建成功"
+                        }, null, 2),
+                    },
+                ],
+            };
+        } else if (name === "strapi_content_types_update") {
+            // Validate input using Zod (includes authorization check)
+            const validatedArgs = validateToolInput("strapi_content_types_update", args, requestId);
+            const { server, uid, contentType, userAuthorized } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+
+            const data = await makeRestRequest(
+                server, 
+                `api/content-type-builder/content-types/${uid}`, 
+                "PUT", 
+                undefined, 
+                contentType, 
+                userAuthorized, 
+                requestId
+            );
+
+            result = {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            data: data,
+                            note: `表 ${uid} 更新成功，已全量覆盖旧结构`
+                        }, null, 2),
+                    },
+                ],
+            };
+        } else if (name === "strapi_content_types_delete") {
+            // Validate input using Zod (includes authorization check)
+            const validatedArgs = validateToolInput("strapi_content_types_delete", args, requestId);
+            const { server, uid, userAuthorized } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+
+            const data = await makeRestRequest(
+                server, 
+                `api/content-type-builder/content-types/${uid}`, 
+                "DELETE", 
+                undefined, 
+                undefined, 
+                userAuthorized, 
+                requestId
+            );
+
+            result = {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            data: data,
+                            warning: `表 ${uid} 及其所有数据已被删除`
+                        }, null, 2),
+                    },
+                ],
             };
         } else {
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
