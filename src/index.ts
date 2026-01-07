@@ -617,6 +617,127 @@ const UploadMediaSchema = z.object({
     }
 );
 
+// Reserved field names in Strapi
+const STRAPI_RESERVED_NAMES = [
+    'id', 'document_id', 'documentId',
+    'created_at', 'createdAt', 'updated_at', 'updatedAt',
+    'published_at', 'publishedAt',
+    'created_by_id', 'createdById', 'updated_by_id', 'updatedById',
+    'created_by', 'createdBy', 'updated_by', 'updatedBy',
+    'entry_id', 'entryId', 'status',
+    'localizations', 'meta', 'locale',
+    '__component', '__contentType'
+];
+
+// Function to check if a field name is reserved
+function isReservedFieldName(name: string): boolean {
+    // Check exact matches
+    if (STRAPI_RESERVED_NAMES.includes(name.toLowerCase())) {
+        return true;
+    }
+    // Check patterns: strapi*, _strapi*, __strapi*
+    const lowerName = name.toLowerCase();
+    if (lowerName.startsWith('strapi') || 
+        lowerName.startsWith('_strapi') || 
+        lowerName.startsWith('__strapi')) {
+        return true;
+    }
+    return false;
+}
+
+// Detailed Attribute Schema for Content Types
+const AttributeTypeSchema = z.enum([
+    "string", "text", "richtext", "email", "password", "uid", 
+    "date", "time", "datetime", "timestamp", 
+    "integer", "biginteger", "float", "decimal", 
+    "boolean", "json", "media", "relation", "component", "dynamiczone", "enumeration"
+]).describe("The type of the attribute");
+
+const BaseAttributeSchema = z.object({
+    type: AttributeTypeSchema,
+    required: z.boolean().optional().describe("If true, this field is mandatory"),
+    unique: z.boolean().optional().describe("If true, field value must be unique"),
+    configurable: z.boolean().optional().default(true),
+    private: z.boolean().optional().describe("If true, removed from API responses"),
+    pluginOptions: z.record(z.any()).optional().describe("e.g., i18n localization settings"),
+    default: z.any().optional().describe("Default value")
+});
+
+const StringAttributeSchema = BaseAttributeSchema.extend({
+    type: z.enum(["string", "text", "richtext", "email", "password", "uid"]),
+    minLength: z.number().int().optional(),
+    maxLength: z.number().int().optional(),
+    regex: z.string().optional(),
+    targetField: z.string().optional().describe("For UID type: field to generate from")
+});
+
+const NumberAttributeSchema = BaseAttributeSchema.extend({
+    type: z.enum(["integer", "biginteger", "float", "decimal"]),
+    min: z.number().optional(),
+    max: z.number().optional()
+});
+
+const EnumerationAttributeSchema = BaseAttributeSchema.extend({
+    type: z.literal("enumeration"),
+    enum: z.array(z.string()).describe("List of allowed values")
+});
+
+const RelationAttributeSchema = BaseAttributeSchema.extend({
+    type: z.literal("relation"),
+    relation: z.enum(["oneToOne", "oneToMany", "manyToOne", "manyToMany"]),
+    target: z.string().describe("Target content type UID (e.g. 'api::article.article')"),
+    inversedBy: z.string().optional(),
+    mappedBy: z.string().optional()
+});
+
+const ComponentAttributeSchema = BaseAttributeSchema.extend({
+    type: z.literal("component"),
+    repeatable: z.boolean(),
+    component: z.string().describe("Component UID (e.g. 'default.seo')")
+});
+
+const AttributeSchema = z.union([
+    StringAttributeSchema,
+    NumberAttributeSchema,
+    EnumerationAttributeSchema,
+    RelationAttributeSchema,
+    ComponentAttributeSchema,
+    BaseAttributeSchema // Fallback for other types
+]).describe("Attribute definition");
+
+const ContentTypeDefinitionSchema = z.object({
+    displayName: z.string().min(1).describe("Human readable name (required at top level)"),
+    singularName: z.string().min(1).describe("kebab-case singular name, no hyphens (e.g. 'article', not 'test-article')"),
+    pluralName: z.string().min(1).describe("kebab-case plural name, no hyphens (e.g. 'articles', must differ from singularName)"),
+    description: z.string().optional().describe("Optional description"),
+    kind: z.enum(["collectionType", "singleType"]).default("collectionType").describe("Kind of content type"),
+    collectionName: z.string().optional().describe("Database table name"),
+    options: z.object({
+        draftAndPublish: z.boolean().optional().default(false),
+        populateCreatorFields: z.boolean().optional()
+    }).optional(),
+    pluginOptions: z.record(z.any()).optional(),
+    attributes: z.record(AttributeSchema).describe("Map of attribute names to their definitions")
+}).refine(
+    (data) => {
+        // Validate that no attribute uses reserved field names
+        const reservedFieldsUsed = Object.keys(data.attributes).filter(key => isReservedFieldName(key));
+        if (reservedFieldsUsed.length > 0) {
+            return false;
+        }
+        return true;
+    },
+    (data) => {
+        const reservedFieldsUsed = Object.keys(data.attributes).filter(key => isReservedFieldName(key));
+        return {
+            message: `INVALID FIELD NAMES: The following attribute names are reserved by Strapi and cannot be used: ${reservedFieldsUsed.join(', ')}.\n\n` +
+                `Reserved names include: id, document_id, created_at, updated_at, published_at, created_by_id, updated_by_id, created_by, updated_by, entry_id, status, localizations, meta, locale, __component, __contentType, and any name starting with 'strapi', '_strapi', or '__strapi'.\n\n` +
+                `Please rename these fields to something else (e.g., 'userId' instead of 'id', 'itemStatus' instead of 'status').`,
+            path: ["attributes"]
+        };
+    }
+);
+
 // Schema for strapi_content_types_get_all tool
 const ContentTypesGetAllSchema = z.object({
     server: z.string().min(1, "Server name is required and cannot be empty")
@@ -631,7 +752,7 @@ const ContentTypesGetOneSchema = z.object({
 // Schema for strapi_content_types_create tool
 const ContentTypesCreateSchema = z.object({
     server: z.string().min(1, "Server name is required and cannot be empty"),
-    contentType: z.record(z.any()),
+    contentType: ContentTypeDefinitionSchema,
     userAuthorized: z.union([
         z.boolean(),
         z.string().transform((str, ctx) => {
@@ -661,7 +782,7 @@ const ContentTypesCreateSchema = z.object({
 const ContentTypesUpdateSchema = z.object({
     server: z.string().min(1, "Server name is required and cannot be empty"),
     uid: z.string().min(1, "UID is required (e.g., api::cat.cat)"),
-    contentType: z.record(z.any()),
+    contentType: ContentTypeDefinitionSchema,
     userAuthorized: z.union([
         z.boolean(),
         z.string().transform((str, ctx) => {
@@ -716,6 +837,39 @@ const ContentTypesDeleteSchema = z.object({
     }
 );
 
+// Schema for strapi_content_types_batch_update tool
+const ContentTypesBatchActionSchema = z.object({
+    server: z.string().min(1, "Server name is required and cannot be empty"),
+    actions: z.array(z.object({
+        action: z.enum(["create", "update", "delete"]),
+        uid: z.string().optional().describe("Required for update/delete"),
+        contentType: ContentTypeDefinitionSchema.optional().describe("Required for create/update")
+    })).min(1, "At least one action is required"),
+    userAuthorized: z.union([
+        z.boolean(),
+        z.string().transform((str, ctx) => {
+            if (str === "true") return true;
+            if (str === "false") return false;
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "userAuthorized must be boolean true/false or string 'true'/'false'"
+            });
+            return z.NEVER;
+        })
+    ]).optional().default(false)
+}).strict().refine(
+    (data) => {
+        if (!data.userAuthorized) {
+            return false;
+        }
+        return true;
+    },
+    {
+        message: "Batch operations require explicit user authorization (userAuthorized: true)",
+        path: ["userAuthorized"]
+    }
+);
+
 // Collection of all schemas for easy access
 const ToolSchemas = {
     strapi_list_servers: ListServersSchema,
@@ -727,7 +881,8 @@ const ToolSchemas = {
     strapi_content_types_get_one: ContentTypesGetOneSchema,
     strapi_content_types_create: ContentTypesCreateSchema,
     strapi_content_types_update: ContentTypesUpdateSchema,
-    strapi_content_types_delete: ContentTypesDeleteSchema
+    strapi_content_types_delete: ContentTypesDeleteSchema,
+    strapi_content_types_batch: ContentTypesBatchActionSchema
 } as const;
 
 // TypeScript types derived from Zod schemas
@@ -1188,7 +1343,7 @@ async function loginWithCredentials(apiUrl: string, email: string, password: str
 }
 
 // Helper function to get server config
-async function getServerConfig(serverName: string): Promise<{ API_URL: string, JWT: string }> {
+async function getServerConfig(serverName: string, useAdminAuth: boolean = false): Promise<{ API_URL: string, JWT: string }> {
     if (Object.keys(config).length === 0) {
         const exampleConfig1 = {
             "myserver": {
@@ -1250,29 +1405,25 @@ async function getServerConfig(serverName: string): Promise<{ API_URL: string, J
         );
     }
     
-    // If using api_key, return directly
-    if ('api_key' in serverConfig && serverConfig.api_key) {
-        return {
-            API_URL: serverConfig.api_url,
-            JWT: serverConfig.api_key
-        };
-    }
+    // Determine which authentication to use
+    const hasApiKey = 'api_key' in serverConfig && serverConfig.api_key;
+    const hasEmailPassword = 'email' in serverConfig && serverConfig.email && serverConfig.password;
     
-    // If using email/password, check cache or login
-    if ('email' in serverConfig && serverConfig.email && serverConfig.password) {
-        const cached = jwtCache.get(serverName);
+    // For admin endpoints (content-type-builder, etc.), prefer email/password
+    if (useAdminAuth && hasEmailPassword) {
+        const cached = jwtCache.get(serverName + ':admin');
         const now = Date.now();
         
         // Use cached JWT if valid (expires in 30 days, refresh if less than 1 day remaining)
         if (cached && cached.expiresAt > now + 24 * 60 * 60 * 1000) {
-            logger.debug('Using cached JWT', { server: serverName });
+            logger.debug('Using cached admin JWT', { server: serverName });
             return {
                 API_URL: serverConfig.api_url,
                 JWT: cached.jwt
             };
         }
         
-        // Login to get new JWT
+        // Login to get new admin JWT
         const jwt = await loginWithCredentials(
             serverConfig.api_url,
             serverConfig.email,
@@ -1280,7 +1431,52 @@ async function getServerConfig(serverName: string): Promise<{ API_URL: string, J
         );
         
         // Cache the JWT (expires in 30 days)
-        jwtCache.set(serverName, {
+        jwtCache.set(serverName + ':admin', {
+            jwt,
+            expiresAt: now + 30 * 24 * 60 * 60 * 1000
+        });
+        
+        return {
+            API_URL: serverConfig.api_url,
+            JWT: jwt
+        };
+    }
+    
+    // For regular API endpoints (/api/*), prefer api_key
+    if (!useAdminAuth && hasApiKey) {
+        return {
+            API_URL: serverConfig.api_url,
+            JWT: serverConfig.api_key
+        };
+    }
+    
+    // Fallback: If only one auth method is available, use it
+    if (hasApiKey) {
+        return {
+            API_URL: serverConfig.api_url,
+            JWT: serverConfig.api_key
+        };
+    }
+    
+    if (hasEmailPassword) {
+        const cached = jwtCache.get(serverName + ':admin');
+        const now = Date.now();
+        
+        if (cached && cached.expiresAt > now + 24 * 60 * 60 * 1000) {
+            logger.debug('Using cached admin JWT (fallback)', { server: serverName });
+            return {
+                API_URL: serverConfig.api_url,
+                JWT: cached.jwt
+            };
+        }
+        
+        const jwt = await loginWithCredentials(
+            serverConfig.api_url,
+            serverConfig.email,
+            serverConfig.password
+        );
+        
+        jwtCache.set(serverName + ':admin', {
             jwt,
             expiresAt: now + 30 * 24 * 60 * 60 * 1000
         });
@@ -1294,8 +1490,48 @@ async function getServerConfig(serverName: string): Promise<{ API_URL: string, J
     throw new McpError(
         ErrorCode.InvalidParams,
         `Invalid configuration for server "${serverName}". ` +
-        `Must provide either "api_key" OR both "email" and "password".`
+        `Must provide either "api_key" OR both "email" and "password", or both for dual authentication.`
     );
+}
+
+// Helper function to wait for Strapi restart
+async function waitForStrapiRestart(serverName: string, timeoutMs: number = 60000): Promise<boolean> {
+    logger.debug(`Waiting for Strapi restart on ${serverName}...`);
+    const start = Date.now();
+    
+    // Initial wait to allow Strapi to start restarting
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    while (Date.now() - start < timeoutMs) {
+        try {
+            // We try to fetch content-types (public or authenticated) to check health
+            // Re-fetching config each time to ensure fresh token if needed (though config is static usually)
+            const config = await getServerConfig(serverName, false);
+            
+            // Using node-fetch
+            const response = await fetch(`${config.API_URL}/api/upload/files?pagination[pageSize]=1`, { // A simple lightweight query
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${config.JWT}`
+                }
+            });
+            
+            // If we get any response (even 403 Forbidden), the server is up. 
+            // 502/503/Connection Refused means it's down.
+            if (response.status >= 200 && response.status < 500) {
+                logger.debug('Strapi server is back online');
+                return true;
+            }
+        } catch (error) {
+            // Ignore connection errors
+        }
+        
+        // Wait 2 seconds before retry
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    logger.warn('Strapi restart wait timed out');
+    return false;
 }
 
 
@@ -1306,7 +1542,7 @@ async function makeStrapiRequest(
     params?: Record<string, string>, 
     requestId?: string
 ): Promise<any> {
-    const serverConfig = await getServerConfig(serverName);
+    const serverConfig = await getServerConfig(serverName, true);
     let url = `${serverConfig.API_URL}${endpoint}`;
     if (params) {
         const queryString = new URLSearchParams(params).toString();
@@ -2027,10 +2263,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 "content-type-builder/content-types", 
                 "POST", 
                 undefined, 
-                contentType, 
+                { contentType }, 
                 userAuthorized, 
                 requestId
             );
+            
+            // Wait for Strapi to restart
+            const restarted = await waitForStrapiRestart(server);
 
             result = {
                 content: [
@@ -2039,7 +2278,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         text: JSON.stringify({
                             success: true,
                             data: data,
-                            note: "新表创建成功"
+                            note: "新表创建成功",
+                            serverRestarted: restarted,
+                            warning: "Strapi server has restarted to apply schema changes."
                         }, null, 2),
                     },
                 ],
@@ -2055,10 +2296,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `content-type-builder/content-types/${uid}`, 
                 "PUT", 
                 undefined, 
-                contentType, 
+                { contentType }, 
                 userAuthorized, 
                 requestId
             );
+
+            // Wait for Strapi to restart
+            const restarted = await waitForStrapiRestart(server);
 
             result = {
                 content: [
@@ -2067,7 +2311,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         text: JSON.stringify({
                             success: true,
                             data: data,
-                            note: `表 ${uid} 更新成功，已全量覆盖旧结构`
+                            note: `表 ${uid} 更新成功，已全量覆盖旧结构`,
+                            serverRestarted: restarted,
+                            warning: "Strapi server has restarted to apply schema changes."
                         }, null, 2),
                     },
                 ],
@@ -2088,6 +2334,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 requestId
             );
 
+            // Wait for Strapi to restart
+            const restarted = await waitForStrapiRestart(server);
+
             result = {
                 content: [
                     {
@@ -2095,10 +2344,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         text: JSON.stringify({
                             success: true,
                             data: data,
-                            warning: `表 ${uid} 及其所有数据已被删除`
+                            warning: `表 ${uid} 及其所有数据已被删除。Strapi server has restarted.`,
+                            serverRestarted: restarted
                         }, null, 2),
                     },
                 ],
+            };
+        } else if (name === "strapi_content_types_batch") {
+            const validatedArgs = validateToolInput("strapi_content_types_batch", args, requestId);
+            const { server, actions, userAuthorized } = validatedArgs;
+            logger.startRequest(requestId, name, server);
+
+            const results = [];
+            for (const action of actions) {
+                try {
+                    let data;
+                    if (action.action === "create") {
+                        if (!action.contentType) throw new Error("contentType required for create");
+                        data = await makeRestRequest(server, "content-type-builder/content-types", "POST", undefined, { contentType: action.contentType }, userAuthorized, requestId);
+                    } else if (action.action === "update") {
+                        if (!action.uid || !action.contentType) throw new Error("uid and contentType required for update");
+                        data = await makeRestRequest(server, `content-type-builder/content-types/${action.uid}`, "PUT", undefined, { contentType: action.contentType }, userAuthorized, requestId);
+                    } else if (action.action === "delete") {
+                        if (!action.uid) throw new Error("uid required for delete");
+                        data = await makeRestRequest(server, `content-type-builder/content-types/${action.uid}`, "DELETE", undefined, undefined, userAuthorized, requestId);
+                    }
+                    
+                    // Wait for restart after every modifying action
+                    const restarted = await waitForStrapiRestart(server);
+                    results.push({ 
+                        action: action.action, 
+                        uid: action.uid, 
+                        success: true, 
+                        data,
+                        serverRestarted: restarted 
+                    });
+                    
+                } catch (error) {
+                    const errorMsg = error instanceof Error ? error.message : String(error);
+                    results.push({ action: action.action, uid: action.uid, success: false, error: errorMsg });
+                    // Continue to next action? 
+                    // Probably safer to stop or continue. Let's continue but log it.
+                    logger.error(`Batch action failed: ${action.action} ${action.uid}`, { error: errorMsg });
+                }
+            }
+
+            result = {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({ 
+                        success: true, 
+                        results, 
+                        note: "Batch processing complete. Server restarts were handled." 
+                    }, null, 2)
+                }]
             };
         } else {
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
@@ -2153,7 +2452,9 @@ async function makeRestRequest(
         );
     }
 
-    const serverConfig = await getServerConfig(serverName);
+    // Determine auth type based on endpoint
+    const useAdminAuth = endpoint.startsWith('content-type-builder') || endpoint.startsWith('admin/');
+    const serverConfig = await getServerConfig(serverName, useAdminAuth);
     let url = `${serverConfig.API_URL}/${endpoint}`;
 
     // Parse query parameters if provided
