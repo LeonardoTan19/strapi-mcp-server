@@ -1,0 +1,11 @@
+{
+	"servers": {
+		"strapi": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"/root/vscode/strapi-mcp-server/build/index.js"
+			]
+		}
+	}
+}
