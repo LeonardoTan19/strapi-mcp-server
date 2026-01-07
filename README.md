@@ -55,7 +55,9 @@ You can use this server directly with npx in your Claude Desktop configuration:
 
 ## Configuration
 
-Create a configuration file at `~/.mcp/strapi-mcp-server.config.json`:
+Create a configuration file at `~/.mcp/strapi-mcp-server.config.json`.
+
+### Option 1: Using API Token (Recommended for production)
 
 ```json
 {
@@ -66,6 +68,25 @@ Create a configuration file at `~/.mcp/strapi-mcp-server.config.json`:
   }
 }
 ```
+
+### Option 2: Using Admin Email/Password (Auto-login)
+
+```json
+{
+  "myserver": {
+    "api_url": "http://localhost:1337",
+    "email": "admin@example.com",
+    "password": "your-admin-password",
+    "version": "5.*" // Optional: Specify Strapi version
+  }
+}
+```
+
+**Note**: When using email/password authentication:
+- The server will automatically login using the Strapi admin login endpoint (`/admin/login`)
+- The JWT token will be cached for 30 days
+- You must use admin credentials (not regular user credentials)
+- The token will be automatically refreshed when needed
 
 You can configure multiple Strapi instances by adding them to this file.
 
@@ -79,11 +100,22 @@ The server now supports various version formats:
 
 This helps the server provide version-specific guidance and handle API differences appropriately.
 
-### Getting a JWT Token
+### Getting Authentication Credentials
+
+#### Method 1: API Token (from Admin Panel)
 
 1. Log in to your Strapi admin panel
-2. Create an API token with appropriate permissions
-3. Add the token to your config file under the appropriate server name
+2. Navigate to Settings > API Tokens
+3. Create a new API token with appropriate permissions
+4. Copy the token and add it to your config file as `api_key`
+
+#### Method 2: Admin Email/Password
+
+1. Use your Strapi admin credentials (email and password)
+2. Add them directly to the config file
+3. The server will automatically handle login and token management
+
+**Security Note**: Make sure to set proper file permissions: `chmod 600 ~/.mcp/strapi-mcp-server.config.json`
 
 ## Usage
 

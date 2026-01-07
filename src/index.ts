@@ -931,7 +931,18 @@ const STRAPI_VERSION_DIFFERENCES: StrapiVersionDifferences = {
 
 // Read config file
 const CONFIG_PATH = join(homedir(), '.mcp', 'strapi-mcp-server.config.json');
-let config: Record<string, { api_url: string, api_key: string, version?: string }>;
+
+// Server config can use either api_key OR email+password
+type ServerConfig = {
+    api_url: string;
+    version?: string;
+} & (
+    | { api_key: string; email?: never; password?: never }
+    | { email: string; password: string; api_key?: never }
+);
+
+let config: Record<string, ServerConfig>;
+const jwtCache: Map<string, { jwt: string; expiresAt: number }> = new Map();
 
 try {
     const configContent = readFileSync(CONFIG_PATH, 'utf-8');
@@ -1127,13 +1138,70 @@ const server = new Server(
     }
 );
 
+// Helper function to login with email/password and get JWT
+async function loginWithCredentials(apiUrl: string, email: string, password: string): Promise<string> {
+    const loginUrl = `${apiUrl}/admin/login`;
+    
+    logger.debug('Attempting admin login with email/password', {
+        apiUrl,
+        email
+    });
+    
+    try {
+        const response = await fetch(loginUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                email: email,
+                password: password
+            })
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new McpError(
+                ErrorCode.InvalidParams,
+                `Admin login failed: ${response.statusText}. ${errorText}`
+            );
+        }
+        
+        const data = await response.json() as any;
+        if (!data.data || !data.data.token) {
+            throw new McpError(
+                ErrorCode.InternalError,
+                'Login successful but no admin token received'
+            );
+        }
+        
+        logger.info('Admin login successful', { email });
+        return data.data.token;
+    } catch (error) {
+        logger.error('Admin login failed', {
+            apiUrl,
+            email,
+            errorType: error instanceof Error ? error.constructor.name : typeof error
+        }, error instanceof Error ? error : undefined);
+        throw error;
+    }
+}
+
 // Helper function to get server config
-function getServerConfig(serverName: string): { API_URL: string, JWT: string } {
+async function getServerConfig(serverName: string): Promise<{ API_URL: string, JWT: string }> {
     if (Object.keys(config).length === 0) {
-        const exampleConfig = {
+        const exampleConfig1 = {
             "myserver": {
                 "api_url": "http://localhost:1337",
                 "api_key": "your-jwt-token-from-strapi-admin"
+            }
+        };
+        
+        const exampleConfig2 = {
+            "myserver": {
+                "api_url": "http://localhost:1337",
+                "email": "your-email@example.com",
+                "password": "your-password"
             }
         };
 
@@ -1142,14 +1210,17 @@ function getServerConfig(serverName: string): { API_URL: string, JWT: string } {
             `No server configuration found!\n\n` +
             `Please create a configuration file at:\n` +
             `${CONFIG_PATH}\n\n` +
-            `Example configuration:\n` +
-            `${JSON.stringify(exampleConfig, null, 2)}\n\n` +
+            `Example configuration (Option 1 - API Key):\n` +
+            `${JSON.stringify(exampleConfig1, null, 2)}\n\n` +
+            `Example configuration (Option 2 - Email/Password):\n` +
+            `${JSON.stringify(exampleConfig2, null, 2)}\n\n` +
             `Steps to set up:\n` +
             `1. Create the .mcp directory: mkdir -p ~/.mcp\n` +
             `2. Create the config file: touch ~/.mcp/strapi-mcp-server.config.json\n` +
-            `3. Add your server configuration using the example above\n` +
-            `4. Get your JWT token from Strapi Admin Panel > Settings > API Tokens\n` +
-            `5. Make sure the file permissions are secure: chmod 600 ~/.mcp/strapi-mcp-server.config.json`
+            `3. Add your server configuration using one of the examples above\n` +
+            `4. For API Key method: Get your JWT token from Strapi Admin Panel > Settings > API Tokens\n` +
+            `5. For Email/Password method: Use your Strapi user credentials\n` +
+            `6. Make sure the file permissions are secure: chmod 600 ~/.mcp/strapi-mcp-server.config.json`
         );
     }
 
@@ -1161,19 +1232,70 @@ function getServerConfig(serverName: string): { API_URL: string, JWT: string } {
             `Available servers: ${Object.keys(config).join(', ')}\n\n` +
             `To add a new server, edit:\n` +
             `${CONFIG_PATH}\n\n` +
-            `Example configuration:\n` +
+            `Example configuration (with API key):\n` +
             `{\n` +
             `  "${serverName}": {\n` +
             `    "api_url": "http://localhost:1337",\n` +
             `    "api_key": "your-jwt-token-from-strapi-admin"\n` +
             `  }\n` +
+            `}\n\n` +
+            `Or with email/password:\n` +
+            `{\n` +
+            `  "${serverName}": {\n` +
+            `    "api_url": "http://localhost:1337",\n` +
+            `    "email": "your-email@example.com",\n` +
+            `    "password": "your-password"\n` +
+            `  }\n` +
             `}`
         );
     }
-    return {
-        API_URL: serverConfig.api_url,
-        JWT: serverConfig.api_key
-    };
+    
+    // If using api_key, return directly
+    if ('api_key' in serverConfig && serverConfig.api_key) {
+        return {
+            API_URL: serverConfig.api_url,
+            JWT: serverConfig.api_key
+        };
+    }
+    
+    // If using email/password, check cache or login
+    if ('email' in serverConfig && serverConfig.email && serverConfig.password) {
+        const cached = jwtCache.get(serverName);
+        const now = Date.now();
+        
+        // Use cached JWT if valid (expires in 30 days, refresh if less than 1 day remaining)
+        if (cached && cached.expiresAt > now + 24 * 60 * 60 * 1000) {
+            logger.debug('Using cached JWT', { server: serverName });
+            return {
+                API_URL: serverConfig.api_url,
+                JWT: cached.jwt
+            };
+        }
+        
+        // Login to get new JWT
+        const jwt = await loginWithCredentials(
+            serverConfig.api_url,
+            serverConfig.email,
+            serverConfig.password
+        );
+        
+        // Cache the JWT (expires in 30 days)
+        jwtCache.set(serverName, {
+            jwt,
+            expiresAt: now + 30 * 24 * 60 * 60 * 1000
+        });
+        
+        return {
+            API_URL: serverConfig.api_url,
+            JWT: jwt
+        };
+    }
+    
+    throw new McpError(
+        ErrorCode.InvalidParams,
+        `Invalid configuration for server "${serverName}". ` +
+        `Must provide either "api_key" OR both "email" and "password".`
+    );
 }
 
 
@@ -1184,7 +1306,7 @@ async function makeStrapiRequest(
     params?: Record<string, string>, 
     requestId?: string
 ): Promise<any> {
-    const serverConfig = getServerConfig(serverName);
+    const serverConfig = await getServerConfig(serverName);
     let url = `${serverConfig.API_URL}${endpoint}`;
     if (params) {
         const queryString = new URLSearchParams(params).toString();
@@ -1286,7 +1408,7 @@ async function uploadMedia(serverName: string, imageBuffer: Buffer, fileName: st
         );
     }
 
-    const serverConfig = getServerConfig(serverName);
+    const serverConfig = await getServerConfig(serverName);
     const formData = new FormData();
 
     // Update filename extension if format is changed
@@ -1714,7 +1836,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const validatedArgs = validateToolInput("strapi_get_content_types", args, requestId);
             const { server } = validatedArgs;
             logger.startRequest(requestId, name, server);
-            const data = await makeStrapiRequest(server, "/api/content-type-builder/content-types", undefined, requestId);
+            const data = await makeStrapiRequest(server, "/content-type-builder/content-types", undefined, requestId);
 
             // Add helpful usage information to the response
             const response = {
@@ -1861,7 +1983,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const validatedArgs = validateToolInput("strapi_content_types_get_all", args, requestId);
             const { server } = validatedArgs;
             logger.startRequest(requestId, name, server);
-            const data = await makeStrapiRequest(server, "/api/content-type-builder/content-types", undefined, requestId);
+            const data = await makeStrapiRequest(server, "/content-type-builder/content-types", undefined, requestId);
 
             result = {
                 content: [
@@ -1880,7 +2002,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const validatedArgs = validateToolInput("strapi_content_types_get_one", args, requestId);
             const { server, uid } = validatedArgs;
             logger.startRequest(requestId, name, server);
-            const data = await makeStrapiRequest(server, `/api/content-type-builder/content-types/${uid}`, undefined, requestId);
+            const data = await makeStrapiRequest(server, `/content-type-builder/content-types/${uid}`, undefined, requestId);
 
             result = {
                 content: [
@@ -1902,7 +2024,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const data = await makeRestRequest(
                 server, 
-                "api/content-type-builder/content-types", 
+                "content-type-builder/content-types", 
                 "POST", 
                 undefined, 
                 contentType, 
@@ -1930,7 +2052,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const data = await makeRestRequest(
                 server, 
-                `api/content-type-builder/content-types/${uid}`, 
+                `content-type-builder/content-types/${uid}`, 
                 "PUT", 
                 undefined, 
                 contentType, 
@@ -1958,7 +2080,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const data = await makeRestRequest(
                 server, 
-                `api/content-type-builder/content-types/${uid}`, 
+                `content-type-builder/content-types/${uid}`, 
                 "DELETE", 
                 undefined, 
                 undefined, 
@@ -2031,7 +2153,7 @@ async function makeRestRequest(
         );
     }
 
-    const serverConfig = getServerConfig(serverName);
+    const serverConfig = await getServerConfig(serverName);
     let url = `${serverConfig.API_URL}/${endpoint}`;
 
     // Parse query parameters if provided
